@@ -35,6 +35,7 @@ uses
   , Vcl.ImgList
   , Vcl.Controls
   , System.ImageList
+  , SynEdit
   , SynEditOptionsDialog
   , SynEditPrint
   , SynEditCodeFolding
@@ -69,7 +70,7 @@ type
     SynHighlighter : TSynCustomHighlighter;
   end;
 
-  TAllegato = record
+  TLinkedDoc = record
     FileName: string;
     FileType: string;
     Compressione: string;
@@ -78,12 +79,20 @@ type
     procedure Clear;
   end;
 
+  TLegalInvoiceLoader = class
+  public
+    class procedure LoadFromFile(const AFileName: string;
+      const ASynEditor: TSynEdit);
+    class function LoadFromStream(const AInputStream: TStream;
+      const AOutStream: TStringStream): Boolean;
+  end;
+
   TLegalInvoice = record
   private
     FParsed: Boolean;
     FXML: string;
     FHTML: string;
-    FAllegati: TArray<TAllegato>;
+    FAllegati: TArray<TLinkedDoc>;
     procedure SetXML(const Value: string);
     procedure ParseAllegati(const AXMLDoc: IXMLDocument);
     function GetHasAllegati: Boolean;
@@ -103,7 +112,7 @@ type
     property Parsed: Boolean read FParsed;
     property XML: string read FXML write SetXML;
     property HTML: string read FHTML;
-    property Allegati: TArray<TAllegato> read FAllegati;
+    property Allegati: TArray<TLinkedDoc> read FAllegati;
     property HasAllegati: Boolean read GetHasAllegati;
   end;
 
@@ -137,7 +146,12 @@ implementation
 {$R *.dfm}
 
 uses
-  Windows, StrUtils, IOUtils, NetEncoding, ShellAPI;
+  Windows
+  , System.StrUtils
+  , System.IOUtils
+  , System.NetEncoding
+  , Winapi.ShellAPI
+  , PKCS7Extractor;
 
 
 procedure TdmResources.DataModuleCreate(Sender: TObject);
@@ -299,7 +313,7 @@ end;
 procedure TLegalInvoice.ParseAllegati(const AXMLDoc: IXMLDocument);
 var
   LAllegati: IDOMNodeList;
-  LAllegato: TAllegato;
+  LAllegato: TLinkedDoc;
   LAllegatoNode: IDOMNode;
   LAllegatoElement: IDOMElement;
   LList: IDOMNodeList;
@@ -357,7 +371,7 @@ end;
 
 { TAllegato }
 
-procedure TAllegato.Clear;
+procedure TLinkedDoc.Clear;
 begin
   FileName := '';
   FileType := '';
@@ -365,7 +379,7 @@ begin
   Data := '';
 end;
 
-procedure TAllegato.DumpAndOpen;
+procedure TLinkedDoc.DumpAndOpen;
 var
   LTempFileName: string;
   LBytes: TBytes;
@@ -386,5 +400,56 @@ begin
     LBytesStream.Free;
   end;
 end;
+
+{ TLegalInvoiceLoader }
+
+class function TLegalInvoiceLoader.LoadFromStream(
+  const AInputStream: TStream;
+  const AOutStream: TStringStream): Boolean;
+begin
+  if PKCS7Extractor.Verify(AInputStream) <> vsUnknown then
+    Result := PKCS7Extractor.Extract(AInputStream, AOutStream)
+  else
+  begin
+    AOutStream.LoadFromStream(AInputStream);
+    Result := True;
+  end;
+end;
+
+class procedure TLegalInvoiceLoader.LoadFromFile(
+  const AFileName: string;
+  const ASynEditor: TSynEdit);
+var
+  LFileStream: TFileStream;
+  LOutStream: TMemoryStream;
+begin
+  LOutStream := nil;
+  LFileStream := TFileStream.Create(AFileName, fmOpenRead);
+  try
+    if SameText(ExtractFileExt(AFileName), '.p7m') then
+    begin
+      LOutStream := TMemoryStream.Create;
+      if PKCS7Extractor.Extract(LFileStream, LOutStream) then
+      begin
+        LOutStream.Position := 0;
+        ASynEditor.Lines.LoadFromStream(LOutStream, TEncoding.UTF8);
+      end;
+    end
+    else
+    begin
+      ASynEditor.Lines.LoadFromStream(LFileStream, TEncoding.UTF8);
+    end;
+  finally
+    LOutStream.Free;
+    LFileStream.Free;
+  end;
+end;
+
+initialization
+  PKCS7Extractor.Unload;
+  FreeLibrary(GetModuleHandle(LIBEAY32_LIBRARY));
+  PKCS7Extractor.SetFolder(
+    ExtractFilePath(GetModuleName(HInstance)));
+  PKCS7Extractor.Load
 
 end.

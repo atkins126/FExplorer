@@ -58,7 +58,13 @@ implementation
 {$R *.dfm}
 
 uses
-  Windows, StrUtils, IOUtils, NetEncoding, ShellAPI;
+  Windows
+  , System.StrUtils
+  , System.IOUtils
+  , System.NetEncoding
+  , WinAPI.ShellAPI
+  , FExplorer.Resources
+  ;
 
 { TThumbnail }
 
@@ -120,16 +126,24 @@ begin
 end;
 
 function TdmThumbnailResources.GetSVGText(const AStream: TStream): string;
+var
+  LOutStream: TStringStream;
 begin
-  //Inizializza il Documento XML
-  SourceXML.LoadFromStream(AStream, xetUTF_8);
+  LOutStream := TStringStream.Create('', TEncoding.UTF8);
+  try
+    TLegalInvoiceLoader.LoadFromStream(AStream, LOutStream);
+    //Inizializza il Documento XML
+    SourceXML.LoadFromStream(LOutStream, xetUTF_8);
+  finally
+    LOutStream.Free;
+  end;
   Result := Parse;
 end;
 
 function TdmThumbnailResources.GetSVGText(const AXMLLines: TStrings): string;
 begin
   //Inizializza il Documento XML
-  SourceXML.XML.Assign(AXMLLines);
+  SourceXML.LoadFromXML(AXMLLines.Text);
   Result := Parse;
   if Result = '' then
     raise Exception.Create('Errore nella trasformazione in SVG dell''anteprima dell''icona');

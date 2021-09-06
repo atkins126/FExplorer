@@ -58,6 +58,7 @@ uses
   , Vcl.Styles.Ext
   , HTMLUn2
   , HtmlView
+  , uDragDropUtils
   ;
 
 const
@@ -75,7 +76,8 @@ resourcestring
   STATE_INSERT = 'Inserimento';
   STATE_OVERWRITE = 'Sovrascrittura';
   CLOSING_PROBLEMS = 'Problemi in chiusura!';
-  CONFIRM_ABANDON = '%s non salvato! Si voglionoi abbandonare le modifiche fatte?';
+  CONFIRM_ABANDON = 'File "%s" non salvato! Si voglionoi abbandonare le modifiche fatte?';
+  FILE_SAVED = 'File "%s" salvato correttamente: vuoi aprirlo subito?';
   SVG_PARSING_OK = 'Il parsing SVG è corretto.';
 
 type
@@ -94,7 +96,6 @@ type
     function GetFileName: string;
     function GetName: string;
     procedure SetFileName(const Value: string);
-    procedure LoadFromFile(const AFileName: string);
     procedure RenderAllegati;
     procedure AllegatoButtonClick(Sender: TObject);
     procedure UpdateContentType;
@@ -118,7 +119,7 @@ type
     property ContentType: TFileContentType read FFileContentType;
   end;
 
-  TfrmMain = class(TForm)
+  TfrmMain = class(TForm, IDragDrop)
     OpenDialog: TOpenDialog;
     ActionList: TActionList;
     acOpenFile: TAction;
@@ -208,6 +209,13 @@ type
     acZoomOut: TAction;
     Zoom1: TMenuItem;
     Zoom2: TMenuItem;
+    acSaveHTMLFile: TAction;
+    SaveHTMLfile1: TMenuItem;
+    acSavePDFFile: TAction;
+    SavePDFfile1: TMenuItem;
+    Chiudi1: TMenuItem;
+    Chiuditutto1: TMenuItem;
+    PopHTMLSep: TMenuItem;
     procedure WMGetMinMaxInfo(var Message: TWMGetMinMaxInfo); message WM_GETMINMAXINFO;
     procedure acOpenFileExecute(Sender: TObject);
     procedure acSaveExecute(Sender: TObject);
@@ -282,6 +290,8 @@ type
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure acZoomExecute(Sender: TObject);
     procedure acEditCopyUpdate(Sender: TObject);
+    procedure acSaveHTMLFileExecute(Sender: TObject);
+    procedure acSavePDFFileExecute(Sender: TObject);
   private
     MinFormWidth, MinFormHeight, MaxFormWidth, MaxFormHeight: Integer;
     FThumbnailResource: TdmThumbnailResources;
@@ -306,6 +316,10 @@ type
     FXMLInvoice: TEditingFile;
     FXSLForInvoice: TEditingFile;
     FXSLForIconFile: TEditingFile;
+    FDropTarget: TDropTarget;
+    // implement IDragDrop
+    function DropAllowed(const FileNames: array of string): Boolean;
+    procedure Drop(const FileNames: array of string);
     procedure CloseSplitViewMenu;
     procedure UpdateHighlighters;
     procedure UpdateFromSettings(AEditor: TSynEdit);
@@ -333,8 +347,15 @@ type
     procedure LoadOpenedFiles;
     procedure SetHTMLFontSize(const Value: Integer);
     procedure UpdateContentType;
+    procedure HTMLToPDF(const APDFFileName: TFileName);
+    procedure FileSavedAskToOpen(const AFileName: string);
+    function CanAcceptFileName(const AFileName: string): Boolean;
+    function AcceptedExtensions: string;
     property XMLFontSize: Integer read FXMLFontSize write SetXMLFontSize;
     property HTMLFontSize: Integer read FHTMLFontSize write SetHTMLFontSize;
+  protected
+    procedure CreateWindowHandle(const Params: TCreateParams); override;
+    procedure DestroyWindowHandle; override;
   end;
 
 var
@@ -354,7 +375,6 @@ uses
   , dlgSearchText
   , dlgConfirmReplace
   , FExplorer.About
-  , FTestPrintPreview
   , DPageSetup
   , FSynHighlightProp
   , Math
@@ -362,6 +382,9 @@ uses
   , FExplorer.SettingsForm
   , BegaHtmlPrintPreviewForm
   , BegaPreview
+  , SynPDF
+  , vmHtmlToPdf
+  , PKCS7Extractor
   ;
 
 {$R *.dfm}
@@ -396,7 +419,7 @@ begin
     FInvoice := TLegalInvoice.Create(ASourceXMLInvoice, False);
     if AStyleSheet <> '' then
     begin
-      dmResources.EditingTemplate.XML.Text := AStyleSheet;
+      dmResources.EditingTemplate.LoadFromXML(AStyleSheet);
       FInvoice.StylesheetName := TLegalInvoice.EDITING_XSLT;
     end
     else
@@ -459,7 +482,7 @@ end;
 procedure TEditingFile.RenderAllegati;
 var
   LIndex: Integer;
-  LAllegato: TAllegato;
+  LAllegato: TLinkedDoc;
   LButton: TToolButton;
 begin
   FAllegatiButtons.Clear;
@@ -490,13 +513,14 @@ end;
 
 procedure TEditingFile.ReadFromFile;
 begin
-  LoadFromFile(FileName);
+  TLegalInvoiceLoader.LoadFromFile(FFileName,
+    SynEditor);
 end;
 
 procedure TEditingFile.AllegatoButtonClick(Sender: TObject);
 var
   LButton: TToolButton;
-  LAllegato: TAllegato;
+  LAllegato: TLinkedDoc;
 begin
   LButton := Sender as TToolButton;
   LAllegato := FInvoice.Allegati[LButton.Tag];
@@ -552,6 +576,8 @@ destructor TEditingFile.Destroy;
 begin
   FreeAndNil(FAllegatiButtons);
   FreeAndNil(FIcon);
+  FreeAndNil(HTMLViewer);
+  FreeAndNil(SynEditor);
   inherited;
 end;
 
@@ -561,7 +587,7 @@ var
 begin
   FFileContentType := fcGenericFile;
   LContent := SynEditor.Lines.Text;
-  if SameText(Fextension,'.xml') then
+  if SameText(Fextension,'.xml') or SameText(Fextension,'.p7m') then
   begin
     if pos(':FatturaElettronica', LContent) > 0 then
       FFileContentType := fcLegalInvoice
@@ -580,14 +606,6 @@ begin
     else
       FFileContentType := fcGenericXSL;
   end;
-end;
-
-procedure TEditingFile.LoadFromFile(const AFileName: string);
-var
-  LExtension: string;
-begin
-  LExtension := ExtractFileExt(AFileName);
-  SynEditor.Lines.LoadFromFile(AFileName, TEncoding.UTF8);
 end;
 
 procedure TEditingFile.SaveToFile;
@@ -611,26 +629,33 @@ begin
   UpdateInvoiceViewer;
 end;
 
+function TfrmMain.CanAcceptFileName(const AFileName: string): Boolean;
+begin
+  Result := pos(ExtractFileExt(AFileName), AcceptedExtensions) <> 0;
+end;
+
+function TfrmMain.AcceptedExtensions: string;
+begin
+  //Verifico l'estensione del file
+  Result := '.xml;.p7m';
+  if FEditorSettings.AllowXSL then
+    Result := Result + ';.xsl';
+end;
+
 function TfrmMain.OpenFile(const FileName : string;
   const ARaiseError: Boolean = True): Boolean;
 var
   EditingFile: TEditingFile;
   I, J: Integer;
-  LExtensions: string;
 begin
   Screen.Cursor := crHourGlass;
   Try
     FProcessingFiles := True;
     if FileExists(FileName) then
     begin
-      //Verifico l'estensione del file
-      LExtensions := '.xml;.p7m';
-      if FEditorSettings.AllowXSL then
-        LExtensions := LExtensions + ';.xsl';
-
-      if pos(ExtractFileExt(FileName), LExtensions) = 0 then
+      if not CanAcceptFileName(FileName) then
         raise Exception.CreateFmt('Impossibile caricare un file che non abbia estensione "%s"',
-      [LExtensions]);
+        [AcceptedExtensions]);
 
       //ciclo per cercare se il file è già aperto
       EditingFile := nil;
@@ -731,7 +756,6 @@ end;
 procedure TfrmMain.FormResize(Sender: TObject);
 begin
   AdjustCompactWidth;
-
 end;
 
 procedure TfrmMain.ShowSRDialog(aReplace: boolean);
@@ -798,7 +822,7 @@ procedure TfrmMain.SVClosed(Sender: TObject);
 begin
   // When TSplitView is closed, adjust ButtonOptions and Width
   catMenuItems.ButtonOptions := catMenuItems.ButtonOptions - [boShowCaptions];
-  actMenu.Hint := 'Expand';
+  actMenu.Hint := 'Espandi';
 end;
 
 procedure TfrmMain.SVClosing(Sender: TObject);
@@ -820,13 +844,19 @@ procedure TfrmMain.SVOpened(Sender: TObject);
 begin
   // When not animating, change size of catMenuItems when TSplitView is opened
   catMenuItems.ButtonOptions := catMenuItems.ButtonOptions + [boShowCaptions];
-  actMenu.Hint := 'Collapse';
+  actMenu.Hint := 'Collassa';
 end;
 
 procedure TfrmMain.SVOpening(Sender: TObject);
 begin
   // When animating, change size of catMenuItems at the beginning of open
   catMenuItems.ButtonOptions := catMenuItems.ButtonOptions + [boShowCaptions];
+end;
+
+procedure TfrmMain.DestroyWindowHandle;
+begin
+  FreeAndNil(FDropTarget);
+  inherited;
 end;
 
 function TfrmMain.DialogPosRect: TRect;
@@ -865,6 +895,31 @@ begin
 
   if ConfirmReplaceDialog <> nil then
     ConfirmReplaceDialog.Free;
+end;
+
+procedure TfrmMain.Drop(const FileNames: array of string);
+var
+  i: Integer;
+begin
+  for i := 0 to Length(FileNames)-1 do
+  begin
+    if CanAcceptFileName(FileNames[i]) then
+      OpenFile(FileNames[i], False);
+  end;
+  UpdateInvoiceViewer;
+end;
+
+function TfrmMain.DropAllowed(const FileNames: array of string): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := 0 to Length(FileNames)-1 do
+  begin
+    Result := CanAcceptFileName(FileNames[i]);
+    if Result then
+      Break;
+  end;
 end;
 
 procedure TfrmMain.acSearchExecute(Sender: TObject);
@@ -965,9 +1020,6 @@ begin
 
   //directory di partenza
   CurrentDir := IncludeTrailingPathDelimiter(TPath.GetDocumentsPath);
-
-//  PageControl.Images := dmResources.Images;
-//  PageControl.Images := IconList;
 
   //Inizializza output di stampa
   InitSynEditPrint;
@@ -1100,91 +1152,91 @@ end;
 
 function TfrmMain.AddEditingFile(EditingFile: TEditingFile): Integer;
 var
-  ts : TTabSheet;
-  Editor : TSynEdit;
-  FEViewer: THtmlViewer;
-  ToolBarAllegati: TToolbar;
-  Splitter: TSplitter;
+  LTabSheet: TTabSheet;
+  LEditor: TSynEdit;
+  LFEViewer: THtmlViewer;
+  LToolBarAllegati: TToolbar;
+  LSplitter: TSplitter;
 begin
   //lo aggiungo alla lista dei file aperti
   Result := EditFileList.Add(EditingFile);
   //Appena aggiungo un'oggetto alla lista creo la pagina Associata
-  ts := nil;
-  Editor := nil;
+  LTabSheet := nil;
+  LEditor := nil;
+  LFEViewer := nil;
   Try
-    ts := TTabSheet.Create(self);
-    ts.PageControl := PageControl;
+    LTabSheet := TTabSheet.Create(self);
+    LTabSheet.PageControl := PageControl;
     //Attacco al TAG del tabsheet l'oggetto del file da editare
-    ts.Tag := Integer(EditingFile);
-    ts.Caption := EditingFile.Name;
-    ts.Imagename := EditingFile.ImageName+'-gray';
-    ts.Parent := PageControl;
-    ts.TabVisible := True;
-    EditingFile.TabSheet := ts;
+    LTabSheet.Tag := Integer(EditingFile);
+    LTabSheet.Caption := EditingFile.Name;
+    LTabSheet.Imagename := EditingFile.ImageName+'-gray';
+    LTabSheet.Parent := PageControl;
+    LTabSheet.TabVisible := True;
+    EditingFile.TabSheet := LTabSheet;
 
     //Creo l'oggetto dell'editor all'interno della pagina con l'owner la pagina
-    Editor := TSynEdit.Create(ts);
-    Editor.OnChange := SynEditChange;
-    Editor.OnEnter := SynEditEnter;
-    Editor.MaxUndo := 5000;
-    Editor.Align := alClient;
-    Editor.Parent := ts;
-    Editor.SearchEngine := SynEditSearch;
-    Editor.PopupMenu := popEditor;
+    LEditor := TSynEdit.Create(nil);
+    LEditor.OnChange := SynEditChange;
+    LEditor.OnEnter := SynEditEnter;
+    LEditor.MaxUndo := 5000;
+    LEditor.Align := alClient;
+    LEditor.Parent := LTabSheet;
+    LEditor.SearchEngine := SynEditSearch;
+    LEditor.PopupMenu := popEditor;
     //Assegna le preferenze dell'utente
-    FEditorOptions.AssignTo(Editor);
-    Editor.MaxScrollWidth := 3000;
-    EditingFile.SynEditor := Editor;
+    FEditorOptions.AssignTo(LEditor);
+    LEditor.MaxScrollWidth := 3000;
+    EditingFile.SynEditor := LEditor;
 
-    FEViewer := THtmlViewer.Create(ts);
-    FEViewer.ScrollBars := ssNone;
-    FEViewer.Align := alRight;
-    FEViewer.Width := ts.Width div 2;
-    FEViewer.Parent := ts;
-    FEViewer.PopupMenu := PopHTMLViewer;
+    LFEViewer := THtmlViewer.Create(nil);
+    LFEViewer.ScrollBars := ssNone;
+    LFEViewer.Align := alRight;
+    LFEViewer.Width := LTabSheet.Width div 2;
+    LFEViewer.Parent := LTabSheet;
+    LFEViewer.PopupMenu := PopHTMLViewer;
 
-    ToolBarAllegati := TToolbar.Create(ts);
-    ToolBarAllegati.Align := alTop;
-    ToolBarAllegati.List := True;
-    ToolBarAllegati.ShowCaptions := True;
-    ToolBarAllegati.Height := 30;
-    ToolBarAllegati.Parent := ts;
-    ToolBarAllegati.Images := VirtualImageList;
+    LToolBarAllegati := TToolbar.Create(LTabSheet);
+    LToolBarAllegati.Align := alTop;
+    LToolBarAllegati.List := True;
+    LToolBarAllegati.ShowCaptions := True;
+    LToolBarAllegati.Height := 30;
+    LToolBarAllegati.Parent := LTabSheet;
+    LToolBarAllegati.Images := VirtualImageList;
 
-    Splitter := TSplitter.Create(ts);
-    Splitter.Align := alRight;
-    Splitter.Left := FEViewer.Left-1;
-    Splitter.AutoSnap := False;
-    Splitter.Width := 6;
-    Splitter.Parent := ts;
-    Splitter.Beveled := True;
+    LSplitter := TSplitter.Create(LTabSheet);
+    LSplitter.Align := alRight;
+    LSplitter.Left := LFEViewer.Left-1;
+    LSplitter.AutoSnap := False;
+    LSplitter.Width := 6;
+    LSplitter.Parent := LTabSheet;
+    LSplitter.Beveled := True;
 
-    EditingFile.Splitter := Splitter;
-    EditingFile.ToolbarAllegati := ToolBarAllegati;
-    EditingFile.HTMLViewer := FEViewer;
+    EditingFile.Splitter := LSplitter;
+    EditingFile.ToolbarAllegati := LToolBarAllegati;
+    EditingFile.HTMLViewer := LFEViewer;
 
-    UpdateFromSettings(Editor);
-    UpdateHighlighter(Editor);
-    Editor.Visible := True;
+    UpdateFromSettings(LEditor);
+    UpdateHighlighter(LEditor);
+    LEditor.Visible := True;
 
     //Visualizzo il tabsheet
-    ts.Visible := True;
+    LTabSheet.Visible := True;
   Except
-    ts.Free;
-    Editor.Free;
+    LTabSheet.Free;
+    LEditor.Free;
+    LFEViewer.Free;
     raise;
   End;
 
   //Attivo la pagina appena creata
-  PageControl.ActivePage := ts;
+  PageControl.ActivePage := LTabSheet;
 
   //Forzo "change" della pagina
   PageControl.OnChange(PageControl);
 end;
 
 procedure TfrmMain.UpdateInvoiceViewer;
-var
-  LSVGText: string;
 
   procedure UpdateIconViewer(const ASVGText: string);
   begin
@@ -1240,7 +1292,7 @@ begin
           CurrentEditFile.MostraFatturaForStyleSheet(FEditorSettings,
             FXMLInvoice.SynEditor.lines.Text);
           //Assegno il template con il contenuto del file corrente
-          FThumbnailResource.EditingTemplate.XML.Text := CurrentEditFile.SynEditor.lines.Text;
+          FThumbnailResource.EditingTemplate.LoadFromXML(CurrentEditFile.SynEditor.lines.Text);
           FThumbnailResource.StylesheetName := FThumbnailResource.SVG_EDITING_XSLT;
           UpdateIconViewer(FThumbnailResource.GetSVGText(FXMLInvoice.SynEditor.Lines));
         end
@@ -1308,6 +1360,12 @@ procedure TfrmMain.CloseSplitViewMenu;
 begin
   SV.Close;
   Screen.Cursor := crDefault;
+end;
+
+procedure TfrmMain.CreateWindowHandle(const Params: TCreateParams);
+begin
+  inherited;
+  FDropTarget := TDropTarget.Create(WindowHandle, Self);
 end;
 
 function TfrmMain.CurrentEditFile: TEditingFile;
@@ -1513,6 +1571,50 @@ begin
   FXMLFontSize := Value;
 end;
 
+procedure TfrmMain.FileSavedAskToOpen(const AFileName: string);
+begin
+  if MessageDlg(Format(FILE_SAVED,[AFileName]),
+    TMsgDlgType.mtInformation, [mbYes, MbNo], 0) = mrYes then
+  begin
+    ShellExecute(handle, 'open', PChar(AFilename), nil, nil, SW_SHOWNORMAL);
+  end;
+end;
+
+procedure TfrmMain.acSaveHTMLFileExecute(Sender: TObject);
+var
+  LStream: TStringStream;
+begin
+  SaveDialog.FileName := ChangeFileExt(CurrentEditFile.FileName, '.htm');
+  SaveDialog.Filter := 'Fattura Elettronica in HTML (*.htm)|*.htm';
+  if SaveDialog.Execute then
+  begin
+    LStream := TStringStream.Create(CurrentEditFile.HTMLViewer.Text,
+      TEncoding.UTF8);
+    try
+      LStream.SaveToFile(SaveDialog.FileName);
+      FileSavedAskToOpen(SaveDialog.FileName);
+    finally
+      LStream.Free;
+    end;
+  end;
+end;
+
+procedure TfrmMain.acSavePDFFileExecute(Sender: TObject);
+begin
+  SaveDialog.FileName := ChangeFileExt(CurrentEditFile.FileName, '.pdf');
+  SaveDialog.Filter := 'Fattura Elettronica in PDF (*.pdf)|*.pdf';
+  if SaveDialog.Execute then
+  begin
+    Screen.Cursor := crHourGlass;
+    try
+      HTMLToPDF(SaveDialog.FileName);
+      FileSavedAskToOpen(SaveDialog.FileName);
+    finally
+      Screen.Cursor := crDefault;
+    end;
+  end;
+end;
+
 procedure TfrmMain.SetHTMLFontSize(const Value: Integer);
 var
   LScaleFactor: Single;
@@ -1594,6 +1696,11 @@ begin
   UpdateApplicationStyle(FEditorSettings.StyleName);
   UpdateHighlighter(AEditor);
   BackgroundTrackBar.Position := FEditorSettings.LightBackground;
+  SVGIconImage.UpdateSVGFactory;
+  SVGIconImage16.UpdateSVGFactory;
+  SVGIconImage32.UpdateSVGFactory;
+  SVGIconImage48.UpdateSVGFactory;
+  SVGIconImage96.UpdateSVGFactory;
 end;
 
 procedure TfrmMain.UpdateHighlighter(ASynEditor: TSynEdit);
@@ -1654,6 +1761,9 @@ end;
 
 procedure TfrmMain.actnSaveAsExecute(Sender: TObject);
 begin
+  SaveDialog.FileName := ChangeFileExt(CurrentEditFile.FileName, '.xml');
+  SaveDialog.Filter := 'File Fattura Elettronica (*.xml;*.p7m)|*.xml;*.p7m|Fogli di Stile (*.xsl)|*.xsl';
+
   SaveDialog.FileName := CurrentEditFile.FileName;
   if SaveDialog.Execute then
   begin
@@ -1785,27 +1895,23 @@ end;
 
 procedure TfrmMain.actnColorSettingsExecute(Sender: TObject);
 begin
-  //if CurrentEditor <> nil then
+  if ShowSettings(DialogPosRect,
+    Title_FEViewer,
+    CurrentEditor, FEditorSettings, True) then
   begin
-    if ShowSettings(DialogPosRect,
-      Title_FEViewer,
-      CurrentEditor, FEditorSettings, True) then
-    begin
-      if CurrentEditor <> nil then
-        FEditorSettings.WriteSettings(CurrentEditor.Highlighter, FEditorOptions)
-      else
-        FEditorSettings.WriteSettings(nil, FEditorOptions);
-      UpdateFromSettings(CurrentEditor);
-      UpdateInvoiceViewer;
-      UpdateHighlighters;
-    end;
+    if CurrentEditor <> nil then
+      FEditorSettings.WriteSettings(CurrentEditor.Highlighter, FEditorOptions)
+    else
+      FEditorSettings.WriteSettings(nil, FEditorOptions);
+    UpdateFromSettings(CurrentEditor);
+    UpdateInvoiceViewer;
+    UpdateHighlighters;
   end;
 end;
 
 procedure TfrmMain.actnColorSettingsUpdate(Sender: TObject);
 begin
   actnColorSettings.Enabled := True;
-  //(CurrentEditor <> nil) and (CurrentEditor.Highlighter <> nil);
 end;
 
 procedure TfrmMain.actnFormatXMLExecute(Sender: TObject);
@@ -1942,8 +2048,48 @@ begin
   BackgroundTrackBarChange(nil);
 end;
 
+procedure TfrmMain.HTMLToPDF(const APDFFileName: TFileName);
+var
+  lHtmlToPdf: TvmHtmlToPdfGDI;
+  LOldColor: TColor;
+begin
+  lHtmlToPdf := TvmHtmlToPdfGDI.Create();
+  try
+    lHtmlToPdf.PDFMarginLeft := FEditorSettings.PDFPageSettings.MarginLeft;
+    lHtmlToPdf.PDFMarginTop := FEditorSettings.PDFPageSettings.MarginTop;
+    lHtmlToPdf.PDFMarginRight := FEditorSettings.PDFPageSettings.MarginRight;
+    lHtmlToPdf.PDFMarginBottom := FEditorSettings.PDFPageSettings.MarginBottom;
+    lHtmlToPdf.PDFScaleToFit := True;
+    lHtmlToPdf.PrintOrientation := FEditorSettings.PDFPageSettings.PrintOrientation;
+    lHtmlToPdf.DefaultPaperSize := TPDFPaperSize(FEditorSettings.PDFPageSettings.PaperSize);
+
+    //Cambio il background dell'HTML Viewer per creare un PDF con sfondo bianco
+    //anche quando sto usando un tema scuro
+    LOldColor := CurrentEditFile.HTMLViewer.DefBackground;
+    try
+      SendMessage(CurrentEditFile.HTMLViewer.Handle, WM_SETREDRAW, WPARAM(False), 0);
+      CurrentEditFile.HTMLViewer.DefBackground := clWhite;
+      lHtmlToPdf.SrcViewer := CurrentEditFile.HTMLViewer;
+
+      lHtmlToPdf.PrintPageNumber := False;
+      lHtmlToPdf.TextPageNumber := 'Page %d/%d';
+      lHtmlToPdf.PageNumberPositionPrint := ppBottom;
+
+      lHtmlToPdf.Execute;
+      lHtmlToPdf.SaveToFile(APDFFileName);
+    finally
+      CurrentEditFile.HTMLViewer.DefBackground := LOldColor;
+    end;
+  finally
+    SendMessage(CurrentEditFile.HTMLViewer.Handle, WM_SETREDRAW, WPARAM(True), 0);
+    lHtmlToPdf.Free;
+  end;
+end;
+
 initialization
+  {$IFDEF DEBUG}
   ReportMemoryLeaksOnShutdown := True;
+  {$ENDIF}
 
 end.
 

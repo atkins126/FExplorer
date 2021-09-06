@@ -36,7 +36,8 @@ uses
   Dialogs, ComCtrls, ExtCtrls, ColorGrd, StdCtrls, CheckLst, SynEdit,
   ActnList, SynEditHighlighter, SynUnicode, System.ImageList, Vcl.ImgList,
   SVGIconImageListBase, SVGIconImageList, FExplorer.Settings, Vcl.ButtonGroup,
-  Vcl.ToolWin, FExplorer.Resources, Vcl.VirtualImageList, FExplorer.About, Vcl.WinXCtrls;
+  Vcl.ToolWin, FExplorer.Resources, Vcl.VirtualImageList, FExplorer.About, Vcl.WinXCtrls,
+  SVGIconImage, Vcl.NumberBox;
 
 type
   TSVGSettingsForm = class(TForm)
@@ -95,13 +96,27 @@ type
     IconStyleSheetComboBox: TComboBox;
     ShowXMLCheckBox: TCheckBox;
     tsAdvanced: TTabSheet;
-    RenderingGroupBox: TGroupBox;
-    PreferD2DCheckBox: TCheckBox;
     AllowEditCheckBox: TCheckBox;
     DeveloperGroupBox: TGroupBox;
     AllowXSLCheckBox: TCheckBox;
     AllowXSLToInvoiceCheckBox: TCheckBox;
     AllowXSLtoSVGCheckBox: TCheckBox;
+    tsPDFLayout: TTabSheet;
+    OrientationImageList: TSVGIconImageList;
+    OrientationRadioGroup: TRadioGroup;
+    SVGIconPosition: TSVGIconImage;
+    MarginLeftEdit: TNumberBox;
+    MarginRightEdit: TNumberBox;
+    MarginTopEdit: TNumberBox;
+    MarginBottomEdit: TNumberBox;
+    PaperSizeRadioGroup: TRadioGroup;
+    MarginTopLabel: TLabel;
+    MarginLeftLabel: TLabel;
+    MarginRightLabel: TLabel;
+    MarginBottomLabel: TLabel;
+    RenderingGroupBox: TGroupBox;
+    PreferD2DCheckBox: TCheckBox;
+    EngineRadioGroup: TRadioGroup;
     procedure BoxElementsClick(Sender: TObject);
     procedure cbForegroundClick(Sender: TObject);
     procedure cbBackgroundClick(Sender: TObject);
@@ -121,6 +136,7 @@ type
     procedure ResetButtonClick(Sender: TObject);
     procedure FontDrawItem(Control: TWinControl; Index: Integer; Rect: TRect;
       State: TOwnerDrawState);
+    procedure OrientationRadioGroupClick(Sender: TObject);
   private
     FHighlighter: TSynCustomHighlighter;
     FSourceSynEdit: TSynEdit;
@@ -168,6 +184,7 @@ uses
 {$IFNDEF DISABLE_STYLES}
   Vcl.Themes,
 {$ENDIF}
+  D2DSVGFactory,
   uRegistry;
 
 {$R *.dfm}
@@ -506,6 +523,7 @@ begin
   stGeneral.TabVisible := false;
   tsFont.TabVisible := false;
   stTheme.TabVisible := false;
+  tsPDFLayout.TabVisible := false;
   tsAdvanced.TabVisible := false;
 
   TitlePanel.Font.Height := Round(TitlePanel.Font.Height * 1.5);
@@ -539,11 +557,12 @@ end;
 
 procedure TSVGSettingsForm.AssignSettings(ASettings: TSettings);
 begin
-  if not (ASettings is TEditorSettings) and (MenuButtonGroup.items.Count > 5) then
-    MenuButtonGroup.items.Delete(5);
+  if not (ASettings is TEditorSettings) and (MenuButtonGroup.items.Count > 6) then
+    MenuButtonGroup.items.Delete(6);
   ChangePage(ASettings.ActivePageIndex);
   MenuButtonGroup.ItemIndex := pc.ActivePageIndex +1;
   SettingsImageList.FixedColor := ASettings.ButtonTextColor;
+  SVGIconPosition.FixedColor := ASettings.ButtonTextColor;
   FFileName := ASettings.SettingsFileName;
   ThemesRadioGroup.ItemIndex := Ord(ASettings.ThemeSelection);
 
@@ -554,8 +573,14 @@ begin
   HTMLFontComboBox.ItemIndex := HTMLFontComboBox.Items.IndexOf(ASettings.HTMLFontName);
   HTMLUpDown.Position := ASettings.HTMLFontSize;
 
-  PreferD2DCheckBox.Checked := ASettings.PreferD2D;
-
+  if not WinSvgSupported then
+  begin
+    PreferD2DCheckBox.Visible := False;
+    PreferD2DCheckBox.Checked := False;
+  end
+  else
+    PreferD2DCheckBox.Checked := ASettings.PreferD2D;
+  EngineRadioGroup.ItemIndex := Ord(ASettings.SVGEngine);
   StylesheetComboBox.ItemIndex := StylesheetComboBox.Items.IndexOf(ASettings.StylesheetName);
   IconStyleSheetComboBox.ItemIndex := IconStyleSheetComboBox.Items.IndexOf(ASettings.IconStylesheetName);
 
@@ -566,6 +591,14 @@ begin
     AllowXSLToInvoiceCheckBox.Checked := TEditorSettings(ASettings).AllowXSLToInvoice;
     AllowXSLtoSVGCheckBox.Checked := TEditorSettings(ASettings).AllowXSLToSVG;
   end;
+
+  OrientationRadioGroup.ItemIndex := Ord(ASettings.PDFPageSettings.PrintOrientation);
+  OrientationRadioGroupClick(OrientationRadioGroup);
+  PaperSizeRadioGroup.ItemIndex := Ord(ASettings.PDFPageSettings.PaperSize);
+  MarginLeftEdit.ValueFloat := ASettings.PDFPageSettings.MarginLeft;
+  MarginRightEdit.ValueFloat := ASettings.PDFPageSettings.MarginRight;
+  MarginTopEdit.ValueFloat := ASettings.PDFPageSettings.MarginTop;
+  MarginBottomEdit.ValueFloat := ASettings.PDFPageSettings.MarginBottom;
 
   PopulateAvailThemes;
 end;
@@ -603,7 +636,7 @@ begin
 
   ASettings.StyleName := SelectedStyleName;
   ASettings.PreferD2D := PreferD2DCheckBox.Checked;
-
+  ASettings.SVGEngine := TSVGEngine(EngineRadioGroup.ItemIndex);
   if ASettings is TEditorSettings then
   begin
     TEditorSettings(ASettings).AllowEdit := AllowEditCheckBox.Checked;
@@ -614,6 +647,13 @@ begin
 
   ASettings.StylesheetName := StylesheetComboBox.Text;
   ASettings.IconStylesheetName := IconStyleSheetComboBox.Text;
+
+  ASettings.PDFPageSettings.PrintOrientation := TPrinterOrientation(OrientationRadioGroup.ItemIndex);
+  ASettings.PDFPageSettings.PaperSize := PaperSizeRadioGroup.ItemIndex;
+  ASettings.PDFPageSettings.MarginLeft := MarginLeftEdit.ValueFloat;
+  ASettings.PDFPageSettings.MarginRight := MarginRightEdit.ValueFloat;
+  ASettings.PDFPageSettings.MarginTop := MarginTopEdit.ValueFloat;
+  ASettings.PDFPageSettings.MarginBottom := MarginBottomEdit.ValueFloat;
 end;
 
 procedure TSVGSettingsForm.MenuButtonGroupButtonClicked(Sender: TObject;
@@ -623,11 +663,16 @@ begin
   begin
     case Index of
       0: ExitFromSettings(nil);
-      1,2,3,4,5: ChangePage(Index -1);
+      1,2,3,4,5,6: ChangePage(Index -1);
     else
       Beep;
     end;
   end;
+end;
+
+procedure TSVGSettingsForm.OrientationRadioGroupClick(Sender: TObject);
+begin
+  SVGIconPosition.ImageIndex := OrientationRadioGroup.ItemIndex;
 end;
 
 procedure TSVGSettingsForm.CreateAboutForm;
