@@ -2,7 +2,7 @@
 {                                                                              }
 {       SVG Image in TPicture: useful to show a Scalable Vector Graphic        }
 {                                                                              }
-{       Copyright (c) 2019-2021 (Ethea S.r.l.)                                 }
+{       Copyright (c) 2019-2022 (Ethea S.r.l.)                                 }
 {       Author: Carlo Barazzetta                                               }
 {       Contributors:                                                          }
 {                                                                              }
@@ -600,7 +600,9 @@ begin
   begin
     FSVG := TSVGGraphic(Source).FSVG;
     Changed(Self);
-  end;
+  end
+  else
+    inherited;
 end;
 
 procedure TSVGGraphic.AssignSVG(SVG: ISVG);
@@ -612,7 +614,9 @@ end;
 procedure TSVGGraphic.AssignTo(Dest: TPersistent);
 begin
   if Dest is TSVGGraphic then
-    TSVGGraphic(Dest).Assign(Self);
+    TSVGGraphic(Dest).Assign(Self)
+  else
+    inherited;
 end;
 
 procedure TSVGGraphic.SetOpacity(Value: Byte);
